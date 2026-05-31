@@ -1,17 +1,16 @@
-; ===== Exemplo 1: Básico =====
 ; Variáveis
 (define x 42)
 (define nome "Scheme")
 (define pi 3.14159)
-(define ativo #t)
+(define ativo #t
 
 ; Operações aritméticas
-(define soma (+ x 8))
-(define produto (* 3 4))
+(define soma (+ x ))
+(define produto (* 3 "4"))
 
 ; Exibição
 (display "Valor de x: ")
-(display x)
+(display y)
 (newline)
 (display "Nome: ")
 (display nome)

@@ -22,7 +22,8 @@ clean:
 # Testa todos os exemplos
 test: $(TARGET)
 	@echo "=== Testando exemplos ==="
-	@for f in exemplos/*.scm; do \
+	@for f in ./*.scm; do \
+		[ -f "$$f" ] || continue; \
 		echo "\n--- $$f ---"; \
 		./$(TARGET) $$f && python3 $${f%.scm}.py 2>/dev/null || true; \
 	done

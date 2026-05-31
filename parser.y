@@ -111,26 +111,54 @@ static ASTNode* makeRecoveryNode(int line) {
     return n;
 }
 
-static void validateNode(ASTNodePtr node, SymbolTable scope);
-static void validateBindingExpr(ASTNodePtr node, SymbolTable& scope);
+static bool isNumericType(DataType t) {
+    return t == DataType::INT || t == DataType::FLOAT;
+}
 
-static void validateBodyList(ASTNodePtr node, SymbolTable scope) {
+static bool isUnknownOrAny(DataType t) {
+    return t == DataType::UNKNOWN || t == DataType::ANY;
+}
+
+static void validateNode(ASTNodePtr node, SymbolTable& scope);
+
+static void validateSequence(const std::vector<std::shared_ptr<ASTNode>>& nodes, SymbolTable& scope) {
+    for (auto& child : nodes)
+        validateNode(child, scope);
+}
+
+static void validateBodyList(ASTNodePtr node, SymbolTable& scope) {
     if (!node) return;
     for (auto& child : node->children)
         validateNode(child, scope);
 }
 
-static void validateNode(ASTNodePtr node, SymbolTable scope) {
+static void validateNode(ASTNodePtr node, SymbolTable& scope) {
     if (!node) return;
 
     switch (node->type) {
     case NodeType::IDENT:
-        if (!scope.exists(node->sval))
-            typeWarning("Identificador '" + node->sval + "' pode não estar definido", node->line);
+        if (!scope.exists(node->sval)) {
+            typeError("Identificador '" + node->sval + "' não está definido", node->line);
+            node->dataType = DataType::UNKNOWN;
+        } else {
+            SymbolInfo* si = scope.lookup(node->sval);
+            node->dataType = si ? si->dataType : DataType::UNKNOWN;
+        }
+        return;
+
+    case NodeType::INT_LIT:
+    case NodeType::FLOAT_LIT:
+    case NodeType::STRING_LIT:
+    case NodeType::BOOL_LIT:
+    case NodeType::NIL:
         return;
 
     case NodeType::DEFINE_VAR: {
         validateNode(node->children[0], scope);
+        if (scope.existsInCurrentScope(node->sval)) {
+            typeError("Símbolo '" + node->sval + "' já foi definido neste escopo", node->line);
+            return;
+        }
         SymbolInfo si;
         si.name = node->sval;
         si.dataType = node->children[0]->dataType;
@@ -140,6 +168,11 @@ static void validateNode(ASTNodePtr node, SymbolTable scope) {
     }
 
     case NodeType::DEFINE_FUNC: {
+        if (scope.existsInCurrentScope(node->funcName)) {
+            typeError("Símbolo '" + node->funcName + "' já foi definido neste escopo", node->line);
+            return;
+        }
+
         SymbolInfo si;
         si.name = node->funcName;
         si.dataType = DataType::FUNCTION;
@@ -150,14 +183,17 @@ static void validateNode(ASTNodePtr node, SymbolTable scope) {
         SymbolTable local = scope;
         local.pushScope();
         for (const auto& param : node->params) {
+            if (local.existsInCurrentScope(param)) {
+                typeError("Parâmetro '" + param + "' foi declarado mais de uma vez", node->line);
+                continue;
+            }
             SymbolInfo paramInfo;
             paramInfo.name = param;
             paramInfo.dataType = DataType::ANY;
             paramInfo.isFunction = false;
             local.define(param, paramInfo);
         }
-        for (auto& child : node->children)
-            validateNode(child, local);
+        validateSequence(node->children, local);
         return;
     }
 
@@ -168,14 +204,17 @@ static void validateNode(ASTNodePtr node, SymbolTable scope) {
         SymbolTable local = scope;
         local.pushScope();
         for (const auto& binding : node->bindings) {
+            if (local.existsInCurrentScope(binding.first)) {
+                typeError("Binding '" + binding.first + "' já foi definido neste let", node->line);
+                continue;
+            }
             SymbolInfo bindingInfo;
             bindingInfo.name = binding.first;
             bindingInfo.dataType = binding.second ? binding.second->dataType : DataType::UNKNOWN;
             bindingInfo.isFunction = false;
             local.define(binding.first, bindingInfo);
         }
-        for (auto& child : node->children)
-            validateNode(child, local);
+        validateSequence(node->children, local);
         return;
     }
 
@@ -184,14 +223,17 @@ static void validateNode(ASTNodePtr node, SymbolTable scope) {
         local.pushScope();
         for (const auto& binding : node->bindings) {
             validateNode(binding.second, local);
+            if (local.existsInCurrentScope(binding.first)) {
+                typeError("Binding '" + binding.first + "' já foi definido neste let*", node->line);
+                continue;
+            }
             SymbolInfo bindingInfo;
             bindingInfo.name = binding.first;
             bindingInfo.dataType = binding.second ? binding.second->dataType : DataType::UNKNOWN;
             bindingInfo.isFunction = false;
             local.define(binding.first, bindingInfo);
         }
-        for (auto& child : node->children)
-            validateNode(child, local);
+        validateSequence(node->children, local);
         return;
     }
 
@@ -199,22 +241,23 @@ static void validateNode(ASTNodePtr node, SymbolTable scope) {
         SymbolTable local = scope;
         local.pushScope();
         for (const auto& param : node->params) {
+            if (local.existsInCurrentScope(param)) {
+                typeError("Parâmetro '" + param + "' foi declarado mais de uma vez", node->line);
+                continue;
+            }
             SymbolInfo paramInfo;
             paramInfo.name = param;
             paramInfo.dataType = DataType::ANY;
             paramInfo.isFunction = false;
             local.define(param, paramInfo);
         }
-        for (auto& child : node->children)
-            validateNode(child, local);
+        validateSequence(node->children, local);
         return;
     }
 
     case NodeType::PROGRAM:
     case NodeType::BEGIN_EXPR: {
-        SymbolTable local = scope;
-        for (auto& child : node->children)
-            validateNode(child, local);
+        validateSequence(node->children, scope);
         return;
     }
 
@@ -231,11 +274,6 @@ static void validateNode(ASTNodePtr node, SymbolTable scope) {
     case NodeType::NULL_CHECK:
     case NodeType::PAIR_CHECK:
     case NodeType::COND_EXPR:
-    case NodeType::INT_LIT:
-    case NodeType::FLOAT_LIT:
-    case NodeType::STRING_LIT:
-    case NodeType::BOOL_LIT:
-    case NodeType::NIL:
         break;
     }
 
@@ -243,6 +281,129 @@ static void validateNode(ASTNodePtr node, SymbolTable scope) {
         validateNode(child, scope);
     for (auto& binding : node->bindings)
         validateNode(binding.second, scope);
+
+    switch (node->type) {
+    case NodeType::BINOP: {
+        if (node->children.empty()) {
+            typeError("Operador aritmético sem operandos", node->line);
+            node->dataType = DataType::UNKNOWN;
+            return;
+        }
+        bool allNumeric = true;
+        for (auto& child : node->children) {
+            if (child && !isUnknownOrAny(child->dataType) && !isNumericType(child->dataType)) {
+                allNumeric = false;
+            }
+        }
+        if (!allNumeric)
+            typeError("Operador aritmético recebeu argumento incompatível", node->line);
+        node->dataType = DataType::INT;
+        for (auto& child : node->children) {
+            if (child && child->dataType == DataType::FLOAT) {
+                node->dataType = DataType::FLOAT;
+                break;
+            }
+        }
+        return;
+    }
+
+    case NodeType::IF_EXPR:
+        if (node->children.size() < 2) {
+            typeError("Forma de if incompleta", node->line);
+            node->dataType = DataType::UNKNOWN;
+            return;
+        }
+        if (node->children[0] && !isUnknownOrAny(node->children[0]->dataType) &&
+            node->children[0]->dataType != DataType::BOOL) {
+            typeError("Condição do if deve ser booleana", node->line);
+        }
+        if (node->children.size() >= 3 && node->children[1] && node->children[2] &&
+            !isUnknownOrAny(node->children[1]->dataType) &&
+            !isUnknownOrAny(node->children[2]->dataType) &&
+            node->children[1]->dataType != node->children[2]->dataType) {
+            typeError("Os ramos do if têm tipos incompatíveis", node->line);
+        }
+        node->dataType = (node->children.size() >= 2 && node->children[1])
+                         ? node->children[1]->dataType
+                         : DataType::UNKNOWN;
+        return;
+
+    case NodeType::CALL_EXPR: {
+        if (node->children.empty()) {
+            typeError("Chamada de função sem função alvo", node->line);
+            node->dataType = DataType::UNKNOWN;
+            return;
+        }
+        if (node->children[0] && node->children[0]->type == NodeType::IDENT) {
+            SymbolInfo* si = scope.lookup(node->children[0]->sval);
+            if (!si) {
+                typeError("Função '" + node->children[0]->sval + "' não está definida", node->line);
+            } else {
+                int given = (int)node->children.size() - 1;
+                if (si->isFunction && si->arity >= 0 && given != si->arity) {
+                    typeError("Função '" + node->children[0]->sval + "' espera " +
+                              std::to_string(si->arity) + " argumento(s), mas recebeu " +
+                              std::to_string(given), node->line);
+                } else if (!si->isFunction) {
+                    typeError("'" + node->children[0]->sval + "' não é uma função", node->line);
+                }
+            }
+        }
+        node->dataType = DataType::ANY;
+        return;
+    }
+
+    case NodeType::DISPLAY_EXPR:
+        node->dataType = DataType::VOID;
+        return;
+
+    case NodeType::NEWLINE_EXPR:
+        node->dataType = DataType::VOID;
+        return;
+
+    case NodeType::LIST_EXPR:
+        node->dataType = DataType::LIST;
+        return;
+
+    case NodeType::CAR_EXPR:
+        if (!node->children.empty() && node->children[0] &&
+            !isUnknownOrAny(node->children[0]->dataType) &&
+            node->children[0]->dataType != DataType::LIST) {
+            typeError("car espera uma lista", node->line);
+        }
+        node->dataType = DataType::ANY;
+        return;
+
+    case NodeType::CDR_EXPR:
+        if (!node->children.empty() && node->children[0] &&
+            !isUnknownOrAny(node->children[0]->dataType) &&
+            node->children[0]->dataType != DataType::LIST) {
+            typeError("cdr espera uma lista", node->line);
+        }
+        node->dataType = DataType::LIST;
+        return;
+
+    case NodeType::CONS_EXPR:
+        if (node->children.size() >= 2 && node->children[1] &&
+            !isUnknownOrAny(node->children[1]->dataType) &&
+            node->children[1]->dataType != DataType::LIST) {
+            typeError("cons espera uma lista como segundo argumento", node->line);
+        }
+        node->dataType = DataType::LIST;
+        return;
+
+    case NodeType::NULL_CHECK:
+    case NodeType::PAIR_CHECK:
+        node->dataType = DataType::BOOL;
+        return;
+
+    case NodeType::COND_EXPR:
+        node->dataType = node->children.empty() ? DataType::UNKNOWN : node->children.back()->dataType;
+        return;
+
+    default:
+        return;
+    }
 }
 
 /* -------- Geração de código Python -------- */
@@ -920,17 +1081,6 @@ expr
             ASTNode* args = $3;
             for (auto& c : args->children)
                 n->children.push_back(c);
-            // Verificação de aridade (se for identificador de função conhecida)
-            if ($2->type == NodeType::IDENT) {
-                SymbolInfo* si = symTable.lookup($2->sval);
-                if (si && si->isFunction && si->arity >= 0) {
-                    int given = (int)args->children.size();
-                    if (given != si->arity)
-                        typeError("Função '" + $2->sval + "' espera " +
-                                  std::to_string(si->arity) + " argumento(s), mas recebeu " +
-                                  std::to_string(given), yylineno);
-                }
-            }
             n->dataType = DataType::ANY;
             delete args;
             $$ = n;
@@ -1078,7 +1228,7 @@ int main(int argc, char* argv[]) {
     int parseResult = yyparse();
     fclose(f);
 
-    if (parseResult != 0 || errorCount > 0) {
+    if (parseResult != 0) {
         flushDiagnostics();
         fprintf(stderr, "Compilação falhou.\n");
         return 1;
@@ -1086,7 +1236,7 @@ int main(int argc, char* argv[]) {
 
     // Validação semântica com escopos corretos
     {
-        SymbolTable validateTable = symTable;
+        SymbolTable validateTable;
         validateNode(programRoot, validateTable);
     }
 

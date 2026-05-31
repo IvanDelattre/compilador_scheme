@@ -82,6 +82,10 @@ public:
         return lookup(name) != nullptr;
     }
 
+    bool existsInCurrentScope(const std::string& name) const {
+        return scopes.back().find(name) != scopes.back().end();
+    }
+
     int depth() const { return (int)scopes.size(); }
 
 private:
