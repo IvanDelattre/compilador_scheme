@@ -189,6 +189,69 @@ static bool isUnknownOrAny(DataType t) {
     return t == DataType::UNKNOWN || t == DataType::ANY;
 }
 
+static bool isArithmeticOp(const std::string& op) {
+    return op == "+" || op == "-" || op == "*" || op == "/";
+}
+
+static bool isRelationalOp(const std::string& op) {
+    return op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==";
+}
+
+static bool canCompareTypes(DataType left, DataType right) {
+    if (isUnknownOrAny(left) || isUnknownOrAny(right))
+        return true;
+    if (left == right)
+        return true;
+    if (isNumericType(left) && isNumericType(right))
+        return true;
+    return false;
+}
+
+static bool inferListLiteralElementType(const ASTNodePtr& listNode, DataType& elementType) {
+    if (!listNode || listNode->type != NodeType::LIST_EXPR)
+        return false;
+    if (listNode->children.empty()) {
+        elementType = DataType::UNKNOWN;
+        return true;
+    }
+
+    bool haveType = false;
+    DataType currentType = DataType::UNKNOWN;
+    for (const auto& child : listNode->children) {
+        if (!child || isUnknownOrAny(child->dataType))
+            return false;
+        if (!haveType) {
+            currentType = child->dataType;
+            haveType = true;
+            continue;
+        }
+        if (child->dataType != currentType) {
+            if (isNumericType(child->dataType) && isNumericType(currentType)) {
+                currentType = DataType::FLOAT;
+                continue;
+            }
+            return false;
+        }
+    }
+
+    elementType = currentType;
+    return haveType;
+}
+
+static DataType mergeBranchTypes(DataType left, DataType right, bool& compatible) {
+    compatible = true;
+    if (left == right)
+        return left;
+    if (isUnknownOrAny(left))
+        return right;
+    if (isUnknownOrAny(right))
+        return left;
+    if (isNumericType(left) && isNumericType(right))
+        return DataType::FLOAT;
+    compatible = false;
+    return DataType::UNKNOWN;
+}
+
 static void validateNode(ASTNodePtr node, SymbolTable& scope);
 
 static void validateSequence(const std::vector<std::shared_ptr<ASTNode>>& nodes, SymbolTable& scope) {
@@ -359,21 +422,51 @@ static void validateNode(ASTNodePtr node, SymbolTable& scope) {
             node->dataType = DataType::UNKNOWN;
             return;
         }
-        bool allNumeric = true;
-        for (auto& child : node->children) {
-            if (child && !isUnknownOrAny(child->dataType) && !isNumericType(child->dataType)) {
-                allNumeric = false;
+        if (isArithmeticOp(node->op)) {
+            bool allNumeric = true;
+            for (auto& child : node->children) {
+                if (child && !isUnknownOrAny(child->dataType) && !isNumericType(child->dataType)) {
+                    allNumeric = false;
+                    break;
+                }
             }
-        }
-        if (!allNumeric)
-            typeError("Operador aritmético recebeu argumento incompatível", node->line);
-        node->dataType = DataType::INT;
-        for (auto& child : node->children) {
-            if (child && child->dataType == DataType::FLOAT) {
-                node->dataType = DataType::FLOAT;
-                break;
+            if (!allNumeric)
+                typeError("Operador aritmético recebeu argumento incompatível", node->line);
+
+            node->dataType = DataType::INT;
+            for (auto& child : node->children) {
+                if (child && child->dataType == DataType::FLOAT) {
+                    node->dataType = DataType::FLOAT;
+                    break;
+                }
             }
+            return;
         }
+
+        if (isRelationalOp(node->op)) {
+            for (size_t i = 1; i < node->children.size(); ++i) {
+                const auto& left = node->children[i - 1];
+                const auto& right = node->children[i];
+                if (!left || !right)
+                    continue;
+                if (node->op == "==") {
+                    if (!canCompareTypes(left->dataType, right->dataType)) {
+                        typeError("Comparação de igualdade recebeu tipos incompatíveis", node->line);
+                        break;
+                    }
+                } else {
+                    if ((!isUnknownOrAny(left->dataType) && !isNumericType(left->dataType)) ||
+                        (!isUnknownOrAny(right->dataType) && !isNumericType(right->dataType))) {
+                        typeError("Comparação relacional espera operandos numéricos", node->line);
+                        break;
+                    }
+                }
+            }
+            node->dataType = DataType::BOOL;
+            return;
+        }
+
+        node->dataType = DataType::UNKNOWN;
         return;
     }
 
@@ -387,15 +480,16 @@ static void validateNode(ASTNodePtr node, SymbolTable& scope) {
             node->children[0]->dataType != DataType::BOOL) {
             typeError("Condição do if deve ser booleana", node->line);
         }
-        if (node->children.size() >= 3 && node->children[1] && node->children[2] &&
-            !isUnknownOrAny(node->children[1]->dataType) &&
-            !isUnknownOrAny(node->children[2]->dataType) &&
-            node->children[1]->dataType != node->children[2]->dataType) {
-            typeError("Os ramos do if têm tipos incompatíveis", node->line);
+        if (node->children.size() >= 3 && node->children[1] && node->children[2]) {
+            bool compatible = true;
+            DataType mergedType = mergeBranchTypes(node->children[1]->dataType, node->children[2]->dataType, compatible);
+            if (!compatible) {
+                typeError("Os ramos do if têm tipos incompatíveis", node->line);
+            }
+            node->dataType = mergedType;
+        } else {
+            node->dataType = node->children[1] ? node->children[1]->dataType : DataType::UNKNOWN;
         }
-        node->dataType = (node->children.size() >= 2 && node->children[1])
-                         ? node->children[1]->dataType
-                         : DataType::UNKNOWN;
         return;
 
     case NodeType::CALL_EXPR: {
@@ -436,28 +530,56 @@ static void validateNode(ASTNodePtr node, SymbolTable& scope) {
         return;
 
     case NodeType::CAR_EXPR:
-        if (!node->children.empty() && node->children[0] &&
-            !isUnknownOrAny(node->children[0]->dataType) &&
-            node->children[0]->dataType != DataType::LIST) {
+        if (node->children.empty() || !node->children[0]) {
+            typeError("car espera uma lista", node->line);
+            node->dataType = DataType::UNKNOWN;
+            return;
+        }
+        if (!isUnknownOrAny(node->children[0]->dataType) && node->children[0]->dataType != DataType::LIST) {
             typeError("car espera uma lista", node->line);
         }
-        node->dataType = DataType::ANY;
+        {
+            DataType elementType = DataType::UNKNOWN;
+            if (inferListLiteralElementType(node->children[0], elementType)) {
+                node->dataType = elementType;
+            } else {
+                node->dataType = DataType::ANY;
+            }
+        }
         return;
 
     case NodeType::CDR_EXPR:
-        if (!node->children.empty() && node->children[0] &&
-            !isUnknownOrAny(node->children[0]->dataType) &&
-            node->children[0]->dataType != DataType::LIST) {
+        if (node->children.empty() || !node->children[0]) {
             typeError("cdr espera uma lista", node->line);
+            node->dataType = DataType::UNKNOWN;
+            return;
+        }
+        if (!isUnknownOrAny(node->children[0]->dataType) && node->children[0]->dataType != DataType::LIST) {
+            typeError("cdr espera uma lista", node->line);
+        }
+        if (node->children[0]->type == NodeType::LIST_EXPR) {
+            DataType elementType = DataType::UNKNOWN;
+            inferListLiteralElementType(node->children[0], elementType);
         }
         node->dataType = DataType::LIST;
         return;
 
     case NodeType::CONS_EXPR:
-        if (node->children.size() >= 2 && node->children[1] &&
-            !isUnknownOrAny(node->children[1]->dataType) &&
-            node->children[1]->dataType != DataType::LIST) {
+        if (node->children.size() < 2 || !node->children[0] || !node->children[1]) {
+            typeError("cons espera dois argumentos", node->line);
+            node->dataType = DataType::UNKNOWN;
+            return;
+        }
+        if (!isUnknownOrAny(node->children[1]->dataType) && node->children[1]->dataType != DataType::LIST) {
             typeError("cons espera uma lista como segundo argumento", node->line);
+        }
+        if (node->children[1]->type == NodeType::LIST_EXPR) {
+            DataType elementType = DataType::UNKNOWN;
+            if (inferListLiteralElementType(node->children[1], elementType) &&
+                !isUnknownOrAny(node->children[0]->dataType) &&
+                !canCompareTypes(node->children[0]->dataType, elementType)) {
+                typeError("cons recebeu elemento incompatível com a lista destino", node->line);
+            }
         }
         node->dataType = DataType::LIST;
         return;
@@ -759,7 +881,7 @@ static void genStmt(ASTNodePtr node) {
 static ASTNodePtr programRoot;
 
 
-#line 763 "parser.tab.cpp"
+#line 885 "parser.tab.cpp"
 
 # ifndef YY_CAST
 #  ifdef __cplusplus
@@ -1223,12 +1345,12 @@ static const yytype_int8 yytranslate[] =
 /* YYRLINE[YYN] -- Source line where rule number YYN was defined.  */
 static const yytype_int16 yyrline[] =
 {
-       0,   727,   727,   742,   746,   751,   760,   766,   772,   778,
-     784,   790,   798,   805,   822,   821,   859,   867,   876,   884,
-     883,   914,   913,   943,   942,   972,   979,   992,  1003,  1012,
-    1020,  1029,  1038,  1048,  1059,  1068,  1077,  1092,  1098,  1103,
-    1113,  1117,  1128,  1132,  1141,  1149,  1156,  1169,  1173,  1180,
-    1188,  1194
+       0,   849,   849,   864,   868,   873,   882,   888,   894,   900,
+     906,   912,   920,   927,   944,   943,   981,   989,   998,  1006,
+    1005,  1036,  1035,  1065,  1064,  1094,  1101,  1114,  1125,  1134,
+    1142,  1151,  1160,  1170,  1181,  1190,  1199,  1214,  1220,  1225,
+    1235,  1239,  1250,  1254,  1263,  1271,  1278,  1291,  1295,  1302,
+    1310,  1316
 };
 #endif
 
@@ -2155,7 +2277,7 @@ yyreduce:
   switch (yyn)
     {
   case 2: /* program: expr_list  */
-#line 728 "parser.y"
+#line 850 "parser.y"
         {
             auto prog = std::make_shared<ASTNode>(NodeType::PROGRAM, yylineno);
             // expr_list é um nó PROGRAM com children
@@ -2166,107 +2288,107 @@ yyreduce:
             programRoot = prog;
             (yyval.node) = prog.get();
         }
-#line 2170 "parser.tab.cpp"
+#line 2292 "parser.tab.cpp"
     break;
 
   case 3: /* expr_list: %empty  */
-#line 742 "parser.y"
+#line 864 "parser.y"
         {
             auto n = new ASTNode(NodeType::PROGRAM, yylineno);
             (yyval.node) = n;
         }
-#line 2179 "parser.tab.cpp"
+#line 2301 "parser.tab.cpp"
     break;
 
   case 4: /* expr_list: expr_list expr  */
-#line 747 "parser.y"
+#line 869 "parser.y"
         {
             (yyvsp[-1].node)->children.push_back(std::shared_ptr<ASTNode>((yyvsp[0].node), [](ASTNode*){}));
             (yyval.node) = (yyvsp[-1].node);
         }
-#line 2188 "parser.tab.cpp"
+#line 2310 "parser.tab.cpp"
     break;
 
   case 5: /* expr_list: expr_list error RPAREN  */
-#line 752 "parser.y"
+#line 874 "parser.y"
         {
             yyerrok;
             (yyval.node) = (yyvsp[-2].node);
         }
-#line 2197 "parser.tab.cpp"
+#line 2319 "parser.tab.cpp"
     break;
 
   case 6: /* expr: INT_LIT  */
-#line 761 "parser.y"
+#line 883 "parser.y"
         {
             auto n = new ASTNode(NodeType::INT_LIT, yylineno);
             n->ival = (yyvsp[0].ival); n->dataType = DataType::INT;
             (yyval.node) = n;
         }
-#line 2207 "parser.tab.cpp"
+#line 2329 "parser.tab.cpp"
     break;
 
   case 7: /* expr: FLOAT_LIT  */
-#line 767 "parser.y"
+#line 889 "parser.y"
         {
             auto n = new ASTNode(NodeType::FLOAT_LIT, yylineno);
             n->fval = (yyvsp[0].fval); n->dataType = DataType::FLOAT;
             (yyval.node) = n;
         }
-#line 2217 "parser.tab.cpp"
+#line 2339 "parser.tab.cpp"
     break;
 
   case 8: /* expr: STRING_LIT  */
-#line 773 "parser.y"
+#line 895 "parser.y"
         {
             auto n = new ASTNode(NodeType::STRING_LIT, yylineno);
             n->sval = (yyvsp[0].sval); n->dataType = DataType::STRING;
             (yyval.node) = n;
         }
-#line 2227 "parser.tab.cpp"
+#line 2349 "parser.tab.cpp"
     break;
 
   case 9: /* expr: BOOL_LIT  */
-#line 779 "parser.y"
+#line 901 "parser.y"
         {
             auto n = new ASTNode(NodeType::BOOL_LIT, yylineno);
             n->bval = (yyvsp[0].bval); n->dataType = DataType::BOOL;
             (yyval.node) = n;
         }
-#line 2237 "parser.tab.cpp"
+#line 2359 "parser.tab.cpp"
     break;
 
   case 10: /* expr: NIL_LIT  */
-#line 785 "parser.y"
+#line 907 "parser.y"
         {
             auto n = new ASTNode(NodeType::NIL, yylineno);
             n->dataType = DataType::LIST;
             (yyval.node) = n;
         }
-#line 2247 "parser.tab.cpp"
+#line 2369 "parser.tab.cpp"
     break;
 
   case 11: /* expr: IDENT  */
-#line 791 "parser.y"
+#line 913 "parser.y"
         {
             auto n = new ASTNode(NodeType::IDENT, yylineno);
             n->sval = (yyvsp[0].sval);
             (yyval.node) = n;
         }
-#line 2257 "parser.tab.cpp"
+#line 2379 "parser.tab.cpp"
     break;
 
   case 12: /* expr: LPAREN error RPAREN  */
-#line 799 "parser.y"
+#line 921 "parser.y"
         {
             yyerrok;
             (yyval.node) = makeRecoveryNode(yylineno);
         }
-#line 2266 "parser.tab.cpp"
+#line 2388 "parser.tab.cpp"
     break;
 
   case 13: /* expr: LPAREN KW_DEFINE IDENT expr RPAREN  */
-#line 806 "parser.y"
+#line 928 "parser.y"
         {
             auto n = new ASTNode(NodeType::DEFINE_VAR, yylineno);
             n->sval = (yyvsp[-2].sval);
@@ -2280,11 +2402,11 @@ yyreduce:
             symTable.define((yyvsp[-2].sval), si);
             (yyval.node) = n;
         }
-#line 2284 "parser.tab.cpp"
+#line 2406 "parser.tab.cpp"
     break;
 
   case 14: /* $@1: %empty  */
-#line 822 "parser.y"
+#line 944 "parser.y"
         {
             // Registra a função ANTES do corpo (permite recursão)
             SymbolInfo fsi;
@@ -2303,11 +2425,11 @@ yyreduce:
                 symTable.define(p, si);
             }
         }
-#line 2307 "parser.tab.cpp"
+#line 2429 "parser.tab.cpp"
     break;
 
   case 15: /* expr: LPAREN KW_DEFINE LPAREN IDENT param_list RPAREN $@1 body_list RPAREN  */
-#line 841 "parser.y"
+#line 963 "parser.y"
         {
             auto n = new ASTNode(NodeType::DEFINE_FUNC, yylineno);
             n->funcName = (yyvsp[-5].sval);
@@ -2324,11 +2446,11 @@ yyreduce:
             delete (yyvsp[-4].node); delete body;
             (yyval.node) = n;
         }
-#line 2328 "parser.tab.cpp"
+#line 2450 "parser.tab.cpp"
     break;
 
   case 16: /* expr: LPAREN KW_IF expr expr expr RPAREN  */
-#line 860 "parser.y"
+#line 982 "parser.y"
         {
             auto n = new ASTNode(NodeType::IF_EXPR, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-3].node), [](ASTNode*){}));
@@ -2336,31 +2458,31 @@ yyreduce:
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             (yyval.node) = n;
         }
-#line 2340 "parser.tab.cpp"
+#line 2462 "parser.tab.cpp"
     break;
 
   case 17: /* expr: LPAREN KW_IF expr expr RPAREN  */
-#line 868 "parser.y"
+#line 990 "parser.y"
         {
             auto n = new ASTNode(NodeType::IF_EXPR, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-2].node), [](ASTNode*){}));
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             (yyval.node) = n;
         }
-#line 2351 "parser.tab.cpp"
+#line 2473 "parser.tab.cpp"
     break;
 
   case 18: /* expr: LPAREN KW_COND cond_clauses RPAREN  */
-#line 877 "parser.y"
+#line 999 "parser.y"
         {
             (yyvsp[-1].node)->type = NodeType::COND_EXPR;
             (yyval.node) = (yyvsp[-1].node);
         }
-#line 2360 "parser.tab.cpp"
+#line 2482 "parser.tab.cpp"
     break;
 
   case 19: /* $@2: %empty  */
-#line 884 "parser.y"
+#line 1006 "parser.y"
         {
             symTable.pushScope();
             ASTNode* bl = (yyvsp[-1].node);
@@ -2371,11 +2493,11 @@ yyreduce:
                 symTable.define(b.first, si);
             }
         }
-#line 2375 "parser.tab.cpp"
+#line 2497 "parser.tab.cpp"
     break;
 
   case 20: /* expr: LPAREN KW_LET LPAREN binding_list RPAREN $@2 body_list RPAREN  */
-#line 895 "parser.y"
+#line 1017 "parser.y"
         {
             auto n = new ASTNode(NodeType::LET_EXPR, yylineno);
             n->bindings = (yyvsp[-4].node)->bindings;
@@ -2392,11 +2514,11 @@ yyreduce:
             delete (yyvsp[-4].node); delete body;
             (yyval.node) = n;
         }
-#line 2396 "parser.tab.cpp"
+#line 2518 "parser.tab.cpp"
     break;
 
   case 21: /* $@3: %empty  */
-#line 914 "parser.y"
+#line 1036 "parser.y"
         {
             symTable.pushScope();
             ASTNode* bl = (yyvsp[-1].node);
@@ -2407,11 +2529,11 @@ yyreduce:
                 symTable.define(b.first, si);
             }
         }
-#line 2411 "parser.tab.cpp"
+#line 2533 "parser.tab.cpp"
     break;
 
   case 22: /* expr: LPAREN KW_LETSTAR LPAREN binding_list RPAREN $@3 body_list RPAREN  */
-#line 925 "parser.y"
+#line 1047 "parser.y"
         {
             auto n = new ASTNode(NodeType::LETSTAR_EXPR, yylineno);
             n->bindings = (yyvsp[-4].node)->bindings;
@@ -2427,11 +2549,11 @@ yyreduce:
             delete (yyvsp[-4].node); delete body;
             (yyval.node) = n;
         }
-#line 2431 "parser.tab.cpp"
+#line 2553 "parser.tab.cpp"
     break;
 
   case 23: /* $@4: %empty  */
-#line 943 "parser.y"
+#line 1065 "parser.y"
         {
             symTable.pushScope();
             ASTNode* pl = (yyvsp[-1].node);
@@ -2442,11 +2564,11 @@ yyreduce:
                 symTable.define(p, si);
             }
         }
-#line 2446 "parser.tab.cpp"
+#line 2568 "parser.tab.cpp"
     break;
 
   case 24: /* expr: LPAREN KW_LAMBDA LPAREN param_list RPAREN $@4 body_list RPAREN  */
-#line 954 "parser.y"
+#line 1076 "parser.y"
         {
             auto n = new ASTNode(NodeType::LAMBDA_EXPR, yylineno);
             n->params = (yyvsp[-4].node)->params;
@@ -2463,20 +2585,20 @@ yyreduce:
             delete (yyvsp[-4].node); delete body;
             (yyval.node) = n;
         }
-#line 2467 "parser.tab.cpp"
+#line 2589 "parser.tab.cpp"
     break;
 
   case 25: /* expr: LPAREN KW_BEGIN body_list RPAREN  */
-#line 973 "parser.y"
+#line 1095 "parser.y"
         {
             (yyvsp[-1].node)->type = NodeType::BEGIN_EXPR;
             (yyval.node) = (yyvsp[-1].node);
         }
-#line 2476 "parser.tab.cpp"
+#line 2598 "parser.tab.cpp"
     break;
 
   case 26: /* expr: LPAREN OP_ARITH expr_list RPAREN  */
-#line 980 "parser.y"
+#line 1102 "parser.y"
         {
             auto n = new ASTNode(NodeType::BINOP, yylineno);
             n->op = (yyvsp[-2].sval); free((yyvsp[-2].sval));
@@ -2487,11 +2609,11 @@ yyreduce:
             delete args;
             (yyval.node) = n;
         }
-#line 2491 "parser.tab.cpp"
+#line 2613 "parser.tab.cpp"
     break;
 
   case 27: /* expr: LPAREN OP_REL expr expr RPAREN  */
-#line 993 "parser.y"
+#line 1115 "parser.y"
         {
             auto n = new ASTNode(NodeType::BINOP, yylineno);
             n->op = (yyvsp[-3].sval); free((yyvsp[-3].sval));
@@ -2500,54 +2622,54 @@ yyreduce:
             n->dataType = DataType::BOOL;
             (yyval.node) = n;
         }
-#line 2504 "parser.tab.cpp"
+#line 2626 "parser.tab.cpp"
     break;
 
   case 28: /* expr: LPAREN BUILTIN_DISPLAY expr RPAREN  */
-#line 1004 "parser.y"
+#line 1126 "parser.y"
         {
             auto n = new ASTNode(NodeType::DISPLAY_EXPR, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             n->dataType = DataType::VOID;
             (yyval.node) = n;
         }
-#line 2515 "parser.tab.cpp"
+#line 2637 "parser.tab.cpp"
     break;
 
   case 29: /* expr: LPAREN BUILTIN_NEWLINE RPAREN  */
-#line 1013 "parser.y"
+#line 1135 "parser.y"
         {
             auto n = new ASTNode(NodeType::NEWLINE_EXPR, yylineno);
             n->dataType = DataType::VOID;
             (yyval.node) = n;
         }
-#line 2525 "parser.tab.cpp"
+#line 2647 "parser.tab.cpp"
     break;
 
   case 30: /* expr: LPAREN BUILTIN_CAR expr RPAREN  */
-#line 1021 "parser.y"
+#line 1143 "parser.y"
         {
             auto n = new ASTNode(NodeType::CAR_EXPR, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             n->dataType = DataType::ANY;
             (yyval.node) = n;
         }
-#line 2536 "parser.tab.cpp"
+#line 2658 "parser.tab.cpp"
     break;
 
   case 31: /* expr: LPAREN BUILTIN_CDR expr RPAREN  */
-#line 1030 "parser.y"
+#line 1152 "parser.y"
         {
             auto n = new ASTNode(NodeType::CDR_EXPR, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             n->dataType = DataType::LIST;
             (yyval.node) = n;
         }
-#line 2547 "parser.tab.cpp"
+#line 2669 "parser.tab.cpp"
     break;
 
   case 32: /* expr: LPAREN BUILTIN_CONS expr expr RPAREN  */
-#line 1039 "parser.y"
+#line 1161 "parser.y"
         {
             auto n = new ASTNode(NodeType::CONS_EXPR, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-2].node), [](ASTNode*){}));
@@ -2555,11 +2677,11 @@ yyreduce:
             n->dataType = DataType::LIST;
             (yyval.node) = n;
         }
-#line 2559 "parser.tab.cpp"
+#line 2681 "parser.tab.cpp"
     break;
 
   case 33: /* expr: LPAREN BUILTIN_LIST expr_list RPAREN  */
-#line 1049 "parser.y"
+#line 1171 "parser.y"
         {
             ASTNode* args = (yyvsp[-1].node);
             auto n = new ASTNode(NodeType::LIST_EXPR, yylineno);
@@ -2568,33 +2690,33 @@ yyreduce:
             delete args;
             (yyval.node) = n;
         }
-#line 2572 "parser.tab.cpp"
+#line 2694 "parser.tab.cpp"
     break;
 
   case 34: /* expr: LPAREN BUILTIN_NULLP expr RPAREN  */
-#line 1060 "parser.y"
+#line 1182 "parser.y"
         {
             auto n = new ASTNode(NodeType::NULL_CHECK, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             n->dataType = DataType::BOOL;
             (yyval.node) = n;
         }
-#line 2583 "parser.tab.cpp"
+#line 2705 "parser.tab.cpp"
     break;
 
   case 35: /* expr: LPAREN BUILTIN_PAIRP expr RPAREN  */
-#line 1069 "parser.y"
+#line 1191 "parser.y"
         {
             auto n = new ASTNode(NodeType::PAIR_CHECK, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             n->dataType = DataType::BOOL;
             (yyval.node) = n;
         }
-#line 2594 "parser.tab.cpp"
+#line 2716 "parser.tab.cpp"
     break;
 
   case 36: /* expr: LPAREN expr expr_list RPAREN  */
-#line 1078 "parser.y"
+#line 1200 "parser.y"
         {
             auto n = new ASTNode(NodeType::CALL_EXPR, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-2].node), [](ASTNode*){}));
@@ -2605,67 +2727,67 @@ yyreduce:
             delete args;
             (yyval.node) = n;
         }
-#line 2609 "parser.tab.cpp"
+#line 2731 "parser.tab.cpp"
     break;
 
   case 37: /* body_list: expr  */
-#line 1093 "parser.y"
+#line 1215 "parser.y"
         {
             auto n = new ASTNode(NodeType::BEGIN_EXPR, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[0].node), [](ASTNode*){}));
             (yyval.node) = n;
         }
-#line 2619 "parser.tab.cpp"
+#line 2741 "parser.tab.cpp"
     break;
 
   case 38: /* body_list: body_list expr  */
-#line 1099 "parser.y"
+#line 1221 "parser.y"
         {
             (yyvsp[-1].node)->children.push_back(std::shared_ptr<ASTNode>((yyvsp[0].node), [](ASTNode*){}));
             (yyval.node) = (yyvsp[-1].node);
         }
-#line 2628 "parser.tab.cpp"
+#line 2750 "parser.tab.cpp"
     break;
 
   case 39: /* body_list: body_list error RPAREN  */
-#line 1104 "parser.y"
+#line 1226 "parser.y"
         {
             yyerrok;
             (yyval.node) = (yyvsp[-2].node);
         }
-#line 2637 "parser.tab.cpp"
+#line 2759 "parser.tab.cpp"
     break;
 
   case 40: /* param_list: %empty  */
-#line 1113 "parser.y"
+#line 1235 "parser.y"
         {
             auto n = new ASTNode(NodeType::NIL, yylineno);
             (yyval.node) = n;
         }
-#line 2646 "parser.tab.cpp"
+#line 2768 "parser.tab.cpp"
     break;
 
   case 41: /* param_list: param_list IDENT  */
-#line 1118 "parser.y"
+#line 1240 "parser.y"
         {
             (yyvsp[-1].node)->params.push_back((yyvsp[0].sval));
             free((yyvsp[0].sval));
             (yyval.node) = (yyvsp[-1].node);
         }
-#line 2656 "parser.tab.cpp"
+#line 2778 "parser.tab.cpp"
     break;
 
   case 42: /* binding_list: %empty  */
-#line 1128 "parser.y"
+#line 1250 "parser.y"
         {
             auto n = new ASTNode(NodeType::NIL, yylineno);
             (yyval.node) = n;
         }
-#line 2665 "parser.tab.cpp"
+#line 2787 "parser.tab.cpp"
     break;
 
   case 43: /* binding_list: binding_list binding  */
-#line 1133 "parser.y"
+#line 1255 "parser.y"
         {
             auto pair = std::make_pair((yyvsp[0].node)->sval,
                             std::shared_ptr<ASTNode>((yyvsp[0].node)->children[0].get(), [](ASTNode*){}));
@@ -2674,31 +2796,31 @@ yyreduce:
             delete (yyvsp[0].node);
             (yyval.node) = (yyvsp[-1].node);
         }
-#line 2678 "parser.tab.cpp"
+#line 2800 "parser.tab.cpp"
     break;
 
   case 44: /* binding_list: binding_list error RPAREN  */
-#line 1142 "parser.y"
+#line 1264 "parser.y"
         {
             yyerrok;
             (yyval.node) = (yyvsp[-2].node);
         }
-#line 2687 "parser.tab.cpp"
+#line 2809 "parser.tab.cpp"
     break;
 
   case 45: /* binding: LPAREN IDENT expr RPAREN  */
-#line 1150 "parser.y"
+#line 1272 "parser.y"
         {
             auto n = new ASTNode(NodeType::NIL, yylineno);
             n->sval = (yyvsp[-2].sval); free((yyvsp[-2].sval));
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             (yyval.node) = n;
         }
-#line 2698 "parser.tab.cpp"
+#line 2820 "parser.tab.cpp"
     break;
 
   case 46: /* binding: LPAREN IDENT error RPAREN  */
-#line 1157 "parser.y"
+#line 1279 "parser.y"
         {
             yyerrok;
             auto n = new ASTNode(NodeType::NIL, yylineno);
@@ -2706,61 +2828,61 @@ yyreduce:
             n->children.push_back(std::shared_ptr<ASTNode>(makeRecoveryNode(yylineno)));
             (yyval.node) = n;
         }
-#line 2710 "parser.tab.cpp"
+#line 2832 "parser.tab.cpp"
     break;
 
   case 47: /* cond_clauses: %empty  */
-#line 1169 "parser.y"
+#line 1291 "parser.y"
         {
             auto n = new ASTNode(NodeType::NIL, yylineno);
             (yyval.node) = n;
         }
-#line 2719 "parser.tab.cpp"
+#line 2841 "parser.tab.cpp"
     break;
 
   case 48: /* cond_clauses: cond_clauses cond_clause  */
-#line 1174 "parser.y"
+#line 1296 "parser.y"
         {
             for (auto& c : (yyvsp[0].node)->children)
                 (yyvsp[-1].node)->children.push_back(c);
             delete (yyvsp[0].node);
             (yyval.node) = (yyvsp[-1].node);
         }
-#line 2730 "parser.tab.cpp"
+#line 2852 "parser.tab.cpp"
     break;
 
   case 49: /* cond_clauses: cond_clauses error RPAREN  */
-#line 1181 "parser.y"
+#line 1303 "parser.y"
         {
             yyerrok;
             (yyval.node) = (yyvsp[-2].node);
         }
-#line 2739 "parser.tab.cpp"
+#line 2861 "parser.tab.cpp"
     break;
 
   case 50: /* cond_clause: LPAREN KW_ELSE expr RPAREN  */
-#line 1189 "parser.y"
+#line 1311 "parser.y"
         {
             auto n = new ASTNode(NodeType::NIL, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             (yyval.node) = n;
         }
-#line 2749 "parser.tab.cpp"
+#line 2871 "parser.tab.cpp"
     break;
 
   case 51: /* cond_clause: LPAREN expr expr RPAREN  */
-#line 1195 "parser.y"
+#line 1317 "parser.y"
         {
             auto n = new ASTNode(NodeType::NIL, yylineno);
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-2].node), [](ASTNode*){}));
             n->children.push_back(std::shared_ptr<ASTNode>((yyvsp[-1].node), [](ASTNode*){}));
             (yyval.node) = n;
         }
-#line 2760 "parser.tab.cpp"
+#line 2882 "parser.tab.cpp"
     break;
 
 
-#line 2764 "parser.tab.cpp"
+#line 2886 "parser.tab.cpp"
 
       default: break;
     }
@@ -2984,7 +3106,7 @@ yyreturnlab:
   return yyresult;
 }
 
-#line 1203 "parser.y"
+#line 1325 "parser.y"
 
 
 /* -------- Implementações C++ -------- */

@@ -119,6 +119,69 @@ static bool isUnknownOrAny(DataType t) {
     return t == DataType::UNKNOWN || t == DataType::ANY;
 }
 
+static bool isArithmeticOp(const std::string& op) {
+    return op == "+" || op == "-" || op == "*" || op == "/";
+}
+
+static bool isRelationalOp(const std::string& op) {
+    return op == "<" || op == ">" || op == "<=" || op == ">=" || op == "==";
+}
+
+static bool canCompareTypes(DataType left, DataType right) {
+    if (isUnknownOrAny(left) || isUnknownOrAny(right))
+        return true;
+    if (left == right)
+        return true;
+    if (isNumericType(left) && isNumericType(right))
+        return true;
+    return false;
+}
+
+static bool inferListLiteralElementType(const ASTNodePtr& listNode, DataType& elementType) {
+    if (!listNode || listNode->type != NodeType::LIST_EXPR)
+        return false;
+    if (listNode->children.empty()) {
+        elementType = DataType::UNKNOWN;
+        return true;
+    }
+
+    bool haveType = false;
+    DataType currentType = DataType::UNKNOWN;
+    for (const auto& child : listNode->children) {
+        if (!child || isUnknownOrAny(child->dataType))
+            return false;
+        if (!haveType) {
+            currentType = child->dataType;
+            haveType = true;
+            continue;
+        }
+        if (child->dataType != currentType) {
+            if (isNumericType(child->dataType) && isNumericType(currentType)) {
+                currentType = DataType::FLOAT;
+                continue;
+            }
+            return false;
+        }
+    }
+
+    elementType = currentType;
+    return haveType;
+}
+
+static DataType mergeBranchTypes(DataType left, DataType right, bool& compatible) {
+    compatible = true;
+    if (left == right)
+        return left;
+    if (isUnknownOrAny(left))
+        return right;
+    if (isUnknownOrAny(right))
+        return left;
+    if (isNumericType(left) && isNumericType(right))
+        return DataType::FLOAT;
+    compatible = false;
+    return DataType::UNKNOWN;
+}
+
 static void validateNode(ASTNodePtr node, SymbolTable& scope);
 
 static void validateSequence(const std::vector<std::shared_ptr<ASTNode>>& nodes, SymbolTable& scope) {
@@ -289,21 +352,51 @@ static void validateNode(ASTNodePtr node, SymbolTable& scope) {
             node->dataType = DataType::UNKNOWN;
             return;
         }
-        bool allNumeric = true;
-        for (auto& child : node->children) {
-            if (child && !isUnknownOrAny(child->dataType) && !isNumericType(child->dataType)) {
-                allNumeric = false;
+        if (isArithmeticOp(node->op)) {
+            bool allNumeric = true;
+            for (auto& child : node->children) {
+                if (child && !isUnknownOrAny(child->dataType) && !isNumericType(child->dataType)) {
+                    allNumeric = false;
+                    break;
+                }
             }
-        }
-        if (!allNumeric)
-            typeError("Operador aritmético recebeu argumento incompatível", node->line);
-        node->dataType = DataType::INT;
-        for (auto& child : node->children) {
-            if (child && child->dataType == DataType::FLOAT) {
-                node->dataType = DataType::FLOAT;
-                break;
+            if (!allNumeric)
+                typeError("Operador aritmético recebeu argumento incompatível", node->line);
+
+            node->dataType = DataType::INT;
+            for (auto& child : node->children) {
+                if (child && child->dataType == DataType::FLOAT) {
+                    node->dataType = DataType::FLOAT;
+                    break;
+                }
             }
+            return;
         }
+
+        if (isRelationalOp(node->op)) {
+            for (size_t i = 1; i < node->children.size(); ++i) {
+                const auto& left = node->children[i - 1];
+                const auto& right = node->children[i];
+                if (!left || !right)
+                    continue;
+                if (node->op == "==") {
+                    if (!canCompareTypes(left->dataType, right->dataType)) {
+                        typeError("Comparação de igualdade recebeu tipos incompatíveis", node->line);
+                        break;
+                    }
+                } else {
+                    if ((!isUnknownOrAny(left->dataType) && !isNumericType(left->dataType)) ||
+                        (!isUnknownOrAny(right->dataType) && !isNumericType(right->dataType))) {
+                        typeError("Comparação relacional espera operandos numéricos", node->line);
+                        break;
+                    }
+                }
+            }
+            node->dataType = DataType::BOOL;
+            return;
+        }
+
+        node->dataType = DataType::UNKNOWN;
         return;
     }
 
@@ -317,15 +410,16 @@ static void validateNode(ASTNodePtr node, SymbolTable& scope) {
             node->children[0]->dataType != DataType::BOOL) {
             typeError("Condição do if deve ser booleana", node->line);
         }
-        if (node->children.size() >= 3 && node->children[1] && node->children[2] &&
-            !isUnknownOrAny(node->children[1]->dataType) &&
-            !isUnknownOrAny(node->children[2]->dataType) &&
-            node->children[1]->dataType != node->children[2]->dataType) {
-            typeError("Os ramos do if têm tipos incompatíveis", node->line);
+        if (node->children.size() >= 3 && node->children[1] && node->children[2]) {
+            bool compatible = true;
+            DataType mergedType = mergeBranchTypes(node->children[1]->dataType, node->children[2]->dataType, compatible);
+            if (!compatible) {
+                typeError("Os ramos do if têm tipos incompatíveis", node->line);
+            }
+            node->dataType = mergedType;
+        } else {
+            node->dataType = node->children[1] ? node->children[1]->dataType : DataType::UNKNOWN;
         }
-        node->dataType = (node->children.size() >= 2 && node->children[1])
-                         ? node->children[1]->dataType
-                         : DataType::UNKNOWN;
         return;
 
     case NodeType::CALL_EXPR: {
@@ -366,28 +460,56 @@ static void validateNode(ASTNodePtr node, SymbolTable& scope) {
         return;
 
     case NodeType::CAR_EXPR:
-        if (!node->children.empty() && node->children[0] &&
-            !isUnknownOrAny(node->children[0]->dataType) &&
-            node->children[0]->dataType != DataType::LIST) {
+        if (node->children.empty() || !node->children[0]) {
+            typeError("car espera uma lista", node->line);
+            node->dataType = DataType::UNKNOWN;
+            return;
+        }
+        if (!isUnknownOrAny(node->children[0]->dataType) && node->children[0]->dataType != DataType::LIST) {
             typeError("car espera uma lista", node->line);
         }
-        node->dataType = DataType::ANY;
+        {
+            DataType elementType = DataType::UNKNOWN;
+            if (inferListLiteralElementType(node->children[0], elementType)) {
+                node->dataType = elementType;
+            } else {
+                node->dataType = DataType::ANY;
+            }
+        }
         return;
 
     case NodeType::CDR_EXPR:
-        if (!node->children.empty() && node->children[0] &&
-            !isUnknownOrAny(node->children[0]->dataType) &&
-            node->children[0]->dataType != DataType::LIST) {
+        if (node->children.empty() || !node->children[0]) {
             typeError("cdr espera uma lista", node->line);
+            node->dataType = DataType::UNKNOWN;
+            return;
+        }
+        if (!isUnknownOrAny(node->children[0]->dataType) && node->children[0]->dataType != DataType::LIST) {
+            typeError("cdr espera uma lista", node->line);
+        }
+        if (node->children[0]->type == NodeType::LIST_EXPR) {
+            DataType elementType = DataType::UNKNOWN;
+            inferListLiteralElementType(node->children[0], elementType);
         }
         node->dataType = DataType::LIST;
         return;
 
     case NodeType::CONS_EXPR:
-        if (node->children.size() >= 2 && node->children[1] &&
-            !isUnknownOrAny(node->children[1]->dataType) &&
-            node->children[1]->dataType != DataType::LIST) {
+        if (node->children.size() < 2 || !node->children[0] || !node->children[1]) {
+            typeError("cons espera dois argumentos", node->line);
+            node->dataType = DataType::UNKNOWN;
+            return;
+        }
+        if (!isUnknownOrAny(node->children[1]->dataType) && node->children[1]->dataType != DataType::LIST) {
             typeError("cons espera uma lista como segundo argumento", node->line);
+        }
+        if (node->children[1]->type == NodeType::LIST_EXPR) {
+            DataType elementType = DataType::UNKNOWN;
+            if (inferListLiteralElementType(node->children[1], elementType) &&
+                !isUnknownOrAny(node->children[0]->dataType) &&
+                !canCompareTypes(node->children[0]->dataType, elementType)) {
+                typeError("cons recebeu elemento incompatível com a lista destino", node->line);
+            }
         }
         node->dataType = DataType::LIST;
         return;
