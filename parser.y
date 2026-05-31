@@ -44,6 +44,140 @@ static void checkDefined(const std::string& name, int line) {
         typeWarning("Identificador '" + name + "' pode não estar definido", line);
 }
 
+static void validateNode(ASTNodePtr node, SymbolTable scope);
+static void validateBindingExpr(ASTNodePtr node, SymbolTable& scope);
+
+static void validateBodyList(ASTNodePtr node, SymbolTable scope) {
+    if (!node) return;
+    for (auto& child : node->children)
+        validateNode(child, scope);
+}
+
+static void validateNode(ASTNodePtr node, SymbolTable scope) {
+    if (!node) return;
+
+    switch (node->type) {
+    case NodeType::IDENT:
+        if (!scope.exists(node->sval))
+            typeWarning("Identificador '" + node->sval + "' pode não estar definido", node->line);
+        return;
+
+    case NodeType::DEFINE_VAR: {
+        validateNode(node->children[0], scope);
+        SymbolInfo si;
+        si.name = node->sval;
+        si.dataType = node->children[0]->dataType;
+        si.isFunction = false;
+        scope.define(node->sval, si);
+        return;
+    }
+
+    case NodeType::DEFINE_FUNC: {
+        SymbolInfo si;
+        si.name = node->funcName;
+        si.dataType = DataType::FUNCTION;
+        si.isFunction = true;
+        si.arity = (int)node->params.size();
+        scope.define(node->funcName, si);
+
+        SymbolTable local = scope;
+        local.pushScope();
+        for (const auto& param : node->params) {
+            SymbolInfo paramInfo;
+            paramInfo.name = param;
+            paramInfo.dataType = DataType::ANY;
+            paramInfo.isFunction = false;
+            local.define(param, paramInfo);
+        }
+        for (auto& child : node->children)
+            validateNode(child, local);
+        return;
+    }
+
+    case NodeType::LET_EXPR: {
+        for (const auto& binding : node->bindings)
+            validateNode(binding.second, scope);
+
+        SymbolTable local = scope;
+        local.pushScope();
+        for (const auto& binding : node->bindings) {
+            SymbolInfo bindingInfo;
+            bindingInfo.name = binding.first;
+            bindingInfo.dataType = binding.second ? binding.second->dataType : DataType::UNKNOWN;
+            bindingInfo.isFunction = false;
+            local.define(binding.first, bindingInfo);
+        }
+        for (auto& child : node->children)
+            validateNode(child, local);
+        return;
+    }
+
+    case NodeType::LETSTAR_EXPR: {
+        SymbolTable local = scope;
+        local.pushScope();
+        for (const auto& binding : node->bindings) {
+            validateNode(binding.second, local);
+            SymbolInfo bindingInfo;
+            bindingInfo.name = binding.first;
+            bindingInfo.dataType = binding.second ? binding.second->dataType : DataType::UNKNOWN;
+            bindingInfo.isFunction = false;
+            local.define(binding.first, bindingInfo);
+        }
+        for (auto& child : node->children)
+            validateNode(child, local);
+        return;
+    }
+
+    case NodeType::LAMBDA_EXPR: {
+        SymbolTable local = scope;
+        local.pushScope();
+        for (const auto& param : node->params) {
+            SymbolInfo paramInfo;
+            paramInfo.name = param;
+            paramInfo.dataType = DataType::ANY;
+            paramInfo.isFunction = false;
+            local.define(param, paramInfo);
+        }
+        for (auto& child : node->children)
+            validateNode(child, local);
+        return;
+    }
+
+    case NodeType::PROGRAM:
+    case NodeType::BEGIN_EXPR: {
+        SymbolTable local = scope;
+        for (auto& child : node->children)
+            validateNode(child, local);
+        return;
+    }
+
+    case NodeType::BINOP:
+    case NodeType::UNOP:
+    case NodeType::IF_EXPR:
+    case NodeType::CALL_EXPR:
+    case NodeType::DISPLAY_EXPR:
+    case NodeType::NEWLINE_EXPR:
+    case NodeType::LIST_EXPR:
+    case NodeType::CAR_EXPR:
+    case NodeType::CDR_EXPR:
+    case NodeType::CONS_EXPR:
+    case NodeType::NULL_CHECK:
+    case NodeType::PAIR_CHECK:
+    case NodeType::COND_EXPR:
+    case NodeType::INT_LIT:
+    case NodeType::FLOAT_LIT:
+    case NodeType::STRING_LIT:
+    case NodeType::BOOL_LIT:
+    case NodeType::NIL:
+        break;
+    }
+
+    for (auto& child : node->children)
+        validateNode(child, scope);
+    for (auto& binding : node->bindings)
+        validateNode(binding.second, scope);
+}
+
 /* -------- Geração de código Python -------- */
 static std::string genExpr(ASTNodePtr node);
 static void        genStmt(ASTNodePtr node);
@@ -95,7 +229,6 @@ static std::string genExpr(ASTNodePtr node) {
         return "[]";
 
     case NodeType::IDENT:
-        checkDefined(node->sval, node->line);
         return schemeToPyIdent(node->sval);
 
     case NodeType::BINOP: {
@@ -423,12 +556,6 @@ expr
         {
             auto n = new ASTNode(NodeType::IDENT, yylineno);
             n->sval = $1;
-            if (!symTable.exists($1))
-                typeError(std::string("Identificador '") + $1 + "' não definido", yylineno);
-            else {
-                SymbolInfo* si = symTable.lookup($1);
-                n->dataType = si->dataType;
-            }
             $$ = n;
         }
 
@@ -850,6 +977,12 @@ int main(int argc, char* argv[]) {
     if (parseResult != 0) {
         fprintf(stderr, "Compilação falhou.\n");
         return 1;
+    }
+
+    // Validação semântica com escopos corretos
+    {
+        SymbolTable validateTable = symTable;
+        validateNode(programRoot, validateTable);
     }
 
     // Gera código Python a partir da AST
