@@ -24,8 +24,20 @@ static SymbolTable symTable;
 /* Saída Python acumulada */
 static std::ostringstream pythonOutput;
 
+struct Diagnostic {
+    std::string kind;
+    std::string message;
+    int line = 0;
+    bool fatal = false;
+};
+
+static std::vector<Diagnostic> diagnostics;
+
 /* Nível de indentação atual */
 static int indentLevel = 0;
+
+/* Contagem de erros fatais detectados durante compilação */
+static int errorCount = 0;
 
 /* Helpers de indentação */
 static std::string indent() {
@@ -33,15 +45,70 @@ static std::string indent() {
 }
 
 /* -------- Verificação de tipos -------- */
+void collectDiagnostic(const char* kind, const std::string& msg, int line, bool fatal = false) {
+    diagnostics.push_back(Diagnostic{kind, msg, line, fatal});
+    if (fatal) {
+        ++errorCount;
+    }
+}
+
+static void flushDiagnostics() {
+    for (const auto& diagnostic : diagnostics) {
+        fprintf(stderr, "%s linha %d: %s\n",
+                diagnostic.kind.c_str(), diagnostic.line, diagnostic.message.c_str());
+    }
+    diagnostics.clear();
+}
+
+static std::string translateSyntaxMessage(const std::string& msg) {
+    std::string translated = msg;
+
+    auto replaceAll = [&](const std::string& from, const std::string& to) {
+        std::size_t pos = 0;
+        while ((pos = translated.find(from, pos)) != std::string::npos) {
+            translated.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    };
+
+    replaceAll("syntax error", "erro de sintaxe");
+    replaceAll("unexpected end of file", "fim de arquivo inesperado");
+    replaceAll("unexpected", "símbolo inesperado");
+    replaceAll("expecting", "esperando");
+    replaceAll("cannot back up", "não foi possível retroceder");
+    replaceAll("LPAREN", "parêntese de abertura");
+    replaceAll("RPAREN", "parêntese de fechamento");
+    replaceAll("IDENT", "identificador");
+    replaceAll("INT_LIT", "literal inteiro");
+    replaceAll("FLOAT_LIT", "literal decimal");
+    replaceAll("BOOL_LIT", "literal booleano");
+    replaceAll("STRING_LIT", "literal de string");
+    replaceAll("KW_DEFINE", "define");
+    replaceAll("KW_IF", "if");
+    replaceAll("KW_COND", "cond");
+    replaceAll("KW_ELSE", "else");
+    replaceAll("KW_LET", "let");
+    replaceAll("KW_LETSTAR", "let*");
+    replaceAll("KW_LAMBDA", "lambda");
+
+    return translated;
+}
+
 static void typeWarning(const std::string& msg, int line) {
-    fprintf(stderr, "[Tipo] Aviso linha %d: %s\n", line, msg.c_str());
+    collectDiagnostic("[Aviso]", msg, line, false);
 }
 static void typeError(const std::string& msg, int line) {
-    fprintf(stderr, "[Tipo] Erro linha %d: %s\n", line, msg.c_str());
+    collectDiagnostic("[Erro de tipo]", msg, line, true);
 }
 static void checkDefined(const std::string& name, int line) {
     if (!symTable.exists(name))
         typeWarning("Identificador '" + name + "' pode não estar definido", line);
+}
+
+static ASTNode* makeRecoveryNode(int line) {
+    auto n = new ASTNode(NodeType::NIL, line);
+    n->dataType = DataType::UNKNOWN;
+    return n;
 }
 
 static void validateNode(ASTNodePtr node, SymbolTable scope);
@@ -478,6 +545,8 @@ static ASTNodePtr programRoot;
 %token BUILTIN_CONS BUILTIN_LIST BUILTIN_NULLP BUILTIN_PAIRP
 %token LPAREN RPAREN QUOTE NIL_LIT
 
+%define parse.error verbose
+
 %token <ival>  INT_LIT
 %token <fval>  FLOAT_LIT
 %token <bval>  BOOL_LIT
@@ -516,6 +585,11 @@ expr_list
     | expr_list expr
         {
             $1->children.push_back(std::shared_ptr<ASTNode>($2, [](ASTNode*){}));
+            $$ = $1;
+        }
+    | expr_list error RPAREN
+        {
+            yyerrok;
             $$ = $1;
         }
     ;
@@ -557,6 +631,13 @@ expr
             auto n = new ASTNode(NodeType::IDENT, yylineno);
             n->sval = $1;
             $$ = n;
+        }
+
+    /* Forma parênteseada malformada */
+    | LPAREN error RPAREN
+        {
+            yyerrok;
+            $$ = makeRecoveryNode(yylineno);
         }
 
     /* Define variável: (define x expr) */
@@ -869,6 +950,11 @@ body_list
             $1->children.push_back(std::shared_ptr<ASTNode>($2, [](ASTNode*){}));
             $$ = $1;
         }
+    | body_list error RPAREN
+        {
+            yyerrok;
+            $$ = $1;
+        }
     ;
 
 /* Lista de parâmetros formais */
@@ -902,6 +988,11 @@ binding_list
             delete $2;
             $$ = $1;
         }
+    | binding_list error RPAREN
+        {
+            yyerrok;
+            $$ = $1;
+        }
     ;
 
 binding
@@ -910,6 +1001,14 @@ binding
             auto n = new ASTNode(NodeType::NIL, yylineno);
             n->sval = $2; free($2);
             n->children.push_back(std::shared_ptr<ASTNode>($3, [](ASTNode*){}));
+            $$ = n;
+        }
+    | LPAREN IDENT error RPAREN
+        {
+            yyerrok;
+            auto n = new ASTNode(NodeType::NIL, yylineno);
+            n->sval = $2; free($2);
+            n->children.push_back(std::shared_ptr<ASTNode>(makeRecoveryNode(yylineno)));
             $$ = n;
         }
     ;
@@ -926,6 +1025,11 @@ cond_clauses
             for (auto& c : $2->children)
                 $1->children.push_back(c);
             delete $2;
+            $$ = $1;
+        }
+    | cond_clauses error RPAREN
+        {
+            yyerrok;
             $$ = $1;
         }
     ;
@@ -951,7 +1055,7 @@ cond_clause
 /* -------- Implementações C++ -------- */
 
 void yyerror(const char* msg) {
-    fprintf(stderr, "[Parser] Erro na linha %d: %s\n", yylineno, msg);
+    collectDiagnostic("[Erro de sintaxe]", translateSyntaxMessage(msg), yylineno, true);
 }
 
 int main(int argc, char* argv[]) {
@@ -974,7 +1078,8 @@ int main(int argc, char* argv[]) {
     int parseResult = yyparse();
     fclose(f);
 
-    if (parseResult != 0) {
+    if (parseResult != 0 || errorCount > 0) {
+        flushDiagnostics();
         fprintf(stderr, "Compilação falhou.\n");
         return 1;
     }
@@ -983,6 +1088,12 @@ int main(int argc, char* argv[]) {
     {
         SymbolTable validateTable = symTable;
         validateNode(programRoot, validateTable);
+    }
+
+    if (errorCount > 0) {
+        flushDiagnostics();
+        fprintf(stderr, "Compilação falhou.\n");
+        return 1;
     }
 
     // Gera código Python a partir da AST
@@ -1004,6 +1115,8 @@ int main(int argc, char* argv[]) {
     } else {
         printf("%s", output.c_str());
     }
+
+    flushDiagnostics();
 
     return 0;
 }

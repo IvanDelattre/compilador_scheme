@@ -1,9 +1,7 @@
-; ===== Exemplo 4: Let e Lambda =====
-
 ; let: variáveis locais
-(define (area-retangulo b h)
+(define (area-retangulo)
   (let ((base b)
-        (altura h))
+        (altura ))
     (* base altura)))
 
 (display "Área do retângulo (4x5): ")

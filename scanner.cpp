@@ -516,6 +516,7 @@ char *yytext;
 #include "parser.tab.hpp"   // gerado pelo Bison
 
 extern int yylineno;
+extern void collectDiagnostic(const char* kind, const std::string& msg, int line, bool fatal);
 
 static std::string processString(const char* s) {
     std::string result;
@@ -535,8 +536,8 @@ static std::string processString(const char* s) {
     }
     return result;
 }
-#line 539 "scanner.cpp"
 #line 540 "scanner.cpp"
+#line 541 "scanner.cpp"
 
 #define INITIAL 0
 
@@ -753,10 +754,10 @@ YY_DECL
 		}
 
 	{
-#line 38 "scanner.l"
+#line 39 "scanner.l"
 
 
-#line 760 "scanner.cpp"
+#line 761 "scanner.cpp"
 
 	while ( /*CONSTCOND*/1 )		/* loops until end-of-file is reached */
 		{
@@ -826,107 +827,107 @@ do_action:	/* This label is used only to access EOF actions. */
 case 1:
 /* rule 1 can match eol */
 YY_RULE_SETUP
-#line 40 "scanner.l"
+#line 41 "scanner.l"
 { /* skip whitespace */ }
 	YY_BREAK
 case 2:
 YY_RULE_SETUP
-#line 41 "scanner.l"
+#line 42 "scanner.l"
 { /* comment */ }
 	YY_BREAK
 case 3:
 YY_RULE_SETUP
-#line 43 "scanner.l"
+#line 44 "scanner.l"
 { return LPAREN; }
 	YY_BREAK
 case 4:
 YY_RULE_SETUP
-#line 44 "scanner.l"
+#line 45 "scanner.l"
 { return RPAREN; }
 	YY_BREAK
 case 5:
 YY_RULE_SETUP
-#line 45 "scanner.l"
+#line 46 "scanner.l"
 { return QUOTE; }
 	YY_BREAK
 case 6:
 YY_RULE_SETUP
-#line 47 "scanner.l"
+#line 48 "scanner.l"
 { yylval.sval = strdup("+");  return OP_ARITH; }
 	YY_BREAK
 case 7:
 YY_RULE_SETUP
-#line 48 "scanner.l"
+#line 49 "scanner.l"
 { yylval.sval = strdup("-");  return OP_ARITH; }
 	YY_BREAK
 case 8:
 YY_RULE_SETUP
-#line 49 "scanner.l"
+#line 50 "scanner.l"
 { yylval.sval = strdup("*");  return OP_ARITH; }
 	YY_BREAK
 case 9:
 YY_RULE_SETUP
-#line 50 "scanner.l"
+#line 51 "scanner.l"
 { yylval.sval = strdup("/");  return OP_ARITH; }
 	YY_BREAK
 case 10:
 YY_RULE_SETUP
-#line 52 "scanner.l"
+#line 53 "scanner.l"
 { yylval.sval = strdup("<="); return OP_REL; }
 	YY_BREAK
 case 11:
 YY_RULE_SETUP
-#line 53 "scanner.l"
+#line 54 "scanner.l"
 { yylval.sval = strdup(">="); return OP_REL; }
 	YY_BREAK
 case 12:
 YY_RULE_SETUP
-#line 54 "scanner.l"
+#line 55 "scanner.l"
 { yylval.sval = strdup("<");  return OP_REL; }
 	YY_BREAK
 case 13:
 YY_RULE_SETUP
-#line 55 "scanner.l"
+#line 56 "scanner.l"
 { yylval.sval = strdup(">");  return OP_REL; }
 	YY_BREAK
 case 14:
 YY_RULE_SETUP
-#line 56 "scanner.l"
+#line 57 "scanner.l"
 { yylval.sval = strdup("=="); return OP_REL; }
 	YY_BREAK
 case 15:
 YY_RULE_SETUP
-#line 58 "scanner.l"
+#line 59 "scanner.l"
 { yylval.bval = true;  return BOOL_LIT; }
 	YY_BREAK
 case 16:
 YY_RULE_SETUP
-#line 59 "scanner.l"
+#line 60 "scanner.l"
 { yylval.bval = false; return BOOL_LIT; }
 	YY_BREAK
 case 17:
 YY_RULE_SETUP
-#line 60 "scanner.l"
+#line 61 "scanner.l"
 { yylval.bval = true;  return BOOL_LIT; }
 	YY_BREAK
 case 18:
 YY_RULE_SETUP
-#line 61 "scanner.l"
+#line 62 "scanner.l"
 { yylval.bval = false; return BOOL_LIT; }
 	YY_BREAK
 case 19:
 YY_RULE_SETUP
-#line 63 "scanner.l"
+#line 64 "scanner.l"
 { return NIL_LIT; }
 	YY_BREAK
 case 20:
 YY_RULE_SETUP
-#line 64 "scanner.l"
+#line 65 "scanner.l"
 { return NIL_LIT; }
 	YY_BREAK
 case 21:
 YY_RULE_SETUP
-#line 66 "scanner.l"
+#line 67 "scanner.l"
 {
     yylval.fval = atof(yytext);
     return FLOAT_LIT;
@@ -934,7 +935,7 @@ YY_RULE_SETUP
 	YY_BREAK
 case 22:
 YY_RULE_SETUP
-#line 70 "scanner.l"
+#line 71 "scanner.l"
 {
     yylval.fval = atof(yytext);
     return FLOAT_LIT;
@@ -942,7 +943,7 @@ YY_RULE_SETUP
 	YY_BREAK
 case 23:
 YY_RULE_SETUP
-#line 74 "scanner.l"
+#line 75 "scanner.l"
 {
     yylval.ival = atoi(yytext);
     return INT_LIT;
@@ -950,7 +951,7 @@ YY_RULE_SETUP
 	YY_BREAK
 case 24:
 YY_RULE_SETUP
-#line 78 "scanner.l"
+#line 79 "scanner.l"
 {
     yylval.ival = atoi(yytext);
     return INT_LIT;
@@ -959,7 +960,7 @@ YY_RULE_SETUP
 case 25:
 /* rule 25 can match eol */
 YY_RULE_SETUP
-#line 83 "scanner.l"
+#line 84 "scanner.l"
 {
     yylval.sval = strdup(processString(yytext).c_str());
     return STRING_LIT;
@@ -967,7 +968,7 @@ YY_RULE_SETUP
 	YY_BREAK
 case 26:
 YY_RULE_SETUP
-#line 88 "scanner.l"
+#line 89 "scanner.l"
 {
     // Keywords and builtins
     if (strcmp(yytext, "define") == 0) return KW_DEFINE;
@@ -998,18 +999,20 @@ YY_RULE_SETUP
 	YY_BREAK
 case 27:
 YY_RULE_SETUP
-#line 116 "scanner.l"
+#line 117 "scanner.l"
 {
-    fprintf(stderr, "[Scanner] Erro: caractere desconhecido '%s' na linha %d\n",
-            yytext, yylineno);
+    collectDiagnostic("[Erro léxico]",
+                      std::string("caractere desconhecido '") + yytext + "'",
+                      yylineno,
+                      true);
 }
 	YY_BREAK
 case 28:
 YY_RULE_SETUP
-#line 121 "scanner.l"
+#line 124 "scanner.l"
 ECHO;
 	YY_BREAK
-#line 1013 "scanner.cpp"
+#line 1016 "scanner.cpp"
 case YY_STATE_EOF(INITIAL):
 	yyterminate();
 
@@ -2026,6 +2029,6 @@ void yyfree (void * ptr )
 
 #define YYTABLES_NAME "yytables"
 
-#line 121 "scanner.l"
+#line 124 "scanner.l"
 
 

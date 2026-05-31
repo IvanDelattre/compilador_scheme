@@ -6,6 +6,7 @@
 #include "parser.tab.hpp"   // gerado pelo Bison
 
 extern int yylineno;
+extern void collectDiagnostic(const char* kind, const std::string& msg, int line, bool fatal);
 
 static std::string processString(const char* s) {
     std::string result;
@@ -114,8 +115,10 @@ WS         [ \t\r\n]
 }
 
 .  {
-    fprintf(stderr, "[Scanner] Erro: caractere desconhecido '%s' na linha %d\n",
-            yytext, yylineno);
+    collectDiagnostic("[Erro léxico]",
+                      std::string("caractere desconhecido '") + yytext + "'",
+                      yylineno,
+                      true);
 }
 
 %%
